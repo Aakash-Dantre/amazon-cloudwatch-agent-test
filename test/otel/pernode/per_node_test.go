@@ -63,11 +63,14 @@ func workloadResults(ctx context.Context, t *testing.T, app string) ([]otelmetri
 // path is asserted independently so a broken path can't hide behind the other.
 func TestPerNodeAllocation(t *testing.T) {
 	gt := getGroundTruth(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
 
 	for _, app := range workloadApps {
 		t.Run(app, func(t *testing.T) {
+			// Per-sub-test budget. A context shared across the sequential sub-tests
+			// would leave the second app only whatever the first did not consume,
+			// surfacing a real per-node failure as a misleading deadline error.
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+			defer cancel()
 			results, usedMetric := workloadResults(ctx, t, app)
 			require.NotEmptyf(t, results,
 				"no per-node metrics in CloudWatch for app=%q (expected one of %v carrying target_node); "+
@@ -120,11 +123,11 @@ func TestPerNodeCoverageAcrossNodes(t *testing.T) {
 	if len(gt.nodes) < 2 {
 		t.Skipf("cluster has %d node(s); per-node spread is only meaningful with >= 2", len(gt.nodes))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
-
 	for _, app := range workloadApps {
 		t.Run(app, func(t *testing.T) {
+			// Per-sub-test budget, as in TestPerNodeAllocation.
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+			defer cancel()
 			results, _ := workloadResults(ctx, t, app)
 			require.NotEmptyf(t, results, "no per-node metrics found to assess node spread for app=%q", app)
 
@@ -134,6 +137,13 @@ func TestPerNodeCoverageAcrossNodes(t *testing.T) {
 					seen[tn] = struct{}{}
 				}
 			}
+			// Distinguish "relabel missing" from "workload not spread": with no
+			// target_node label at all the spread assertion below would report
+			// "0 node(s)", which reads as a scheduling problem rather than a
+			// missing target_node relabel on the ServiceMonitor/PodMonitor.
+			require.NotEmptyf(t, seen,
+				"app=%q returned %d series but none carried the %q label; the SM/PM target_node relabel is likely missing",
+				app, len(results), targetNodeLabel)
 			require.GreaterOrEqualf(t, len(seen), 2,
 				"app=%q only observed on %d node(s) (%v); expected spread across >= 2", app, len(seen), keys(seen))
 		})
